@@ -20,12 +20,17 @@ small and legible.
 
 ## Scope
 
-Covered: the derivation core + known-answer test vectors (the values an independent
-implementer must match), and address round-trip / network separation.
+Covered:
 
-Out of scope, by design (not needed to back the Test Vectors section): building and
-unblinding confidential transactions, the tweak-server scan loop, and Schnorr
-key-path spending.
+- the derivation core + known-answer test vectors (the values an independent
+  implementer must match), plus address round-trip / network separation; and
+- the spec's novel claim — a confidential output blinded to the shared-secret key
+  `BK_k` is unblinded non-interactively by the receiver with `bk_k` (the
+  `ct_round_trip_unblind_with_bk` test).
+
+Out of scope, by design — these are wallet integration, not spec verification, and are
+left to the implementation: the tweak-server scan loop, signing, and
+`Wollet`/`TxBuilder` wiring.
 
 ## Run
 

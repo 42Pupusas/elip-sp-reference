@@ -1,19 +1,23 @@
 //! Reference implementation for **Silent Payments for the Liquid Network** (ELIP).
 //!
-//! This crate is intentionally minimal: it covers the *deterministic derivation*
-//! the ELIP's "Test Vectors" section pins — address encoding, input aggregation,
-//! the ECDH shared secret, the per-output spend key `P_k`, the Liquid-specific
-//! blinding key `bk_k`, and the Taproot scriptPubKey — and proves they reproduce
-//! byte-for-byte (see the `known_answer_vectors` test).
+//! This crate is intentionally minimal. It covers:
+//!
+//! - the *deterministic derivation* the ELIP's "Test Vectors" section pins — address
+//!   encoding, input aggregation, the ECDH shared secret, the per-output spend key
+//!   `P_k`, the Liquid-specific blinding key `bk_k`, and the Taproot scriptPubKey —
+//!   reproduced byte-for-byte (`known_answer_vectors`); and
+//! - the spec's novel claim: a confidential output blinded to the shared-secret key
+//!   `BK_k` is unblinded non-interactively by the receiver with `bk_k`
+//!   (`ct_round_trip_unblind_with_bk`).
 //!
 //! It depends on [`lwk_wollet`] **only** for cryptographic primitives (the secp256k1
-//! `EC` context and key/scalar types, the tagged-hash machinery, and Taproot script
-//! construction). All Silent Payments logic is implemented here directly from the
-//! ELIP.
+//! `EC` context and key/scalar types, the tagged-hash machinery, Taproot script
+//! construction, and the CT commitment/range-proof primitives). All Silent Payments
+//! logic is implemented here directly from the ELIP.
 //!
-//! Out of scope, by design: building and unblinding confidential transactions, the
-//! tweak-server scan loop, and Schnorr spending. This crate is about the deterministic
-//! values an independent implementer must match.
+//! Out of scope, by design: anything that is wallet integration rather than spec
+//! verification — the tweak-server scan loop, signing, and `Wollet`/`TxBuilder` wiring
+//! are left to the implementation.
 
 use bech32::primitives::decode::CheckedHrpstring;
 use bech32::{Bech32m, Fe32, Hrp};
@@ -271,6 +275,81 @@ pub fn receiver_derive_output(
     (out, spend_sk)
 }
 
+/// Build a fully-blinded confidential `TxOut` paying `value` of `asset` to a
+/// silent-payment output (ELIP §4.3).
+///
+/// The CT blinding is keyed to the SP-derived `out.blinding_pubkey` (`BK_k`), so the
+/// receiver — who recomputes the same shared secret — can unblind with `bk_k` and no
+/// out-of-band key exchange. This is the spec's novel claim: a confidential output is
+/// both *discovered* (by its Taproot script) and *unblinded* (value/asset) purely from
+/// the silent-payment shared secret. The round-trip is exercised by the
+/// `ct_round_trip_unblind_with_bk` test.
+pub fn build_confidential_sp_txout(
+    out: &SilentPaymentOutput,
+    asset: lwk_wollet::elements::AssetId,
+    value: u64,
+    rng: &mut (impl rand::RngCore + rand::CryptoRng),
+) -> Result<
+    (
+        lwk_wollet::elements::TxOut,
+        lwk_wollet::elements::TxOutSecrets,
+    ),
+    lwk_wollet::elements::secp256k1_zkp::Error,
+> {
+    use lwk_wollet::elements::confidential::{
+        Asset, AssetBlindingFactor, Nonce, Value, ValueBlindingFactor,
+    };
+    use lwk_wollet::elements::secp256k1_zkp::{Generator, PedersenCommitment, RangeProof, Tag};
+    use lwk_wollet::elements::{TxOut, TxOutSecrets, TxOutWitness};
+
+    let script_pubkey = out.script_pubkey();
+    let abf = AssetBlindingFactor::new(&mut *rng);
+    let vbf = ValueBlindingFactor::new(&mut *rng);
+
+    // CT ephemeral nonce + shared secret derived FROM the SP blinding pubkey BK_k.
+    let (nonce, ct_shared_secret) = Nonce::new_confidential(&mut *rng, &EC, &out.blinding_pubkey);
+
+    let asset_tag = Tag::from(asset.into_inner().to_byte_array());
+    let asset_generator = Generator::new_blinded(&EC, asset_tag, abf.into_inner());
+    let value_commitment = PedersenCommitment::new(&EC, value, vbf.into_inner(), asset_generator);
+
+    let mut message = [0u8; 64];
+    message[..32].copy_from_slice(&asset.into_inner().to_byte_array());
+    message[32..].copy_from_slice(abf.into_inner().as_ref());
+
+    let rangeproof = RangeProof::new(
+        &EC,
+        1,
+        value_commitment,
+        value,
+        vbf.into_inner(),
+        &message,
+        script_pubkey.as_bytes(),
+        ct_shared_secret,
+        0,
+        52,
+        asset_generator,
+    )?;
+
+    let txout = TxOut {
+        asset: Asset::Confidential(asset_generator),
+        value: Value::Confidential(value_commitment),
+        nonce,
+        script_pubkey,
+        witness: TxOutWitness {
+            surjection_proof: None,
+            rangeproof: Some(Box::new(rangeproof)),
+        },
+    };
+    let secrets = TxOutSecrets {
+        asset,
+        asset_bf: abf,
+        value,
+        value_bf: vbf,
+    };
+    Ok((txout, secrets))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,6 +456,55 @@ mod tests {
             address.encode(ElementsNetwork::Liquid),
             "lqsp1qqd8n2k7uklxq4aegau7vawtptkgxsja4kt99lpv6krctwpq8tpc65qjxd4lu4etruh9sngx3su9mtqp5fqzxz7re59y5nnez9p03ht3lyudcfhfe",
         );
+    }
+
+    /// The spec's novel claim (ELIP §4.3): a sender blinds a confidential output to the
+    /// shared-secret-derived `BK_k`, and the receiver unblinds it with the
+    /// independently recomputed `bk_k` — recovering the exact asset and value, with no
+    /// out-of-band key exchange. A wrong scan key yields a different `bk_k` and fails.
+    #[test]
+    fn ct_round_trip_unblind_with_bk() {
+        use lwk_wollet::elements::AssetId;
+
+        let scan = sk(0x11);
+        let spend = sk(0x22);
+        let address = SilentPaymentAddress {
+            scan: scan.public_key(&EC),
+            spend: spend.public_key(&EC),
+        };
+        let inputs = [(outpoint_bytes(0xAB, 0), sk(0x33))];
+        let outpoint_l = outpoint_bytes(0xAB, 0);
+        let agg = aggregate_inputs(&inputs, &outpoint_l);
+        let k = 0u32;
+
+        let asset = AssetId::from_slice(&[0x42; 32]).unwrap();
+        let value: u64 = 123_456;
+        let mut rng = rand::thread_rng();
+
+        // Sender: derive the SP output, blind a real confidential TxOut to BK_k.
+        let sender_out = sender_derive_output(&address, &agg, k);
+        let (txout, secrets_in) =
+            build_confidential_sp_txout(&sender_out, asset, value, &mut rng).unwrap();
+
+        // Receiver: independently recompute bk_k and unblind.
+        let (recv_out, _spend_sk) =
+            receiver_derive_output(&scan, &spend, &agg.a_pubkey, &agg.input_hash, k);
+        assert_eq!(recv_out.blinding_seckey, sender_out.blinding_seckey);
+
+        let recovered = txout
+            .unblind(&EC, recv_out.blinding_seckey)
+            .expect("receiver unblinds with shared-secret-derived bk_k");
+        assert_eq!(recovered.asset, asset);
+        assert_eq!(recovered.value, value);
+        assert_eq!(recovered.asset_bf, secrets_in.asset_bf);
+        assert_eq!(recovered.value_bf, secrets_in.value_bf);
+
+        // Wrong scan key -> different bk_k -> unblind fails.
+        let wrong_scan = sk(0x99);
+        let (att_out, _) =
+            receiver_derive_output(&wrong_scan, &spend, &agg.a_pubkey, &agg.input_hash, k);
+        assert_ne!(att_out.blinding_seckey, sender_out.blinding_seckey);
+        assert!(txout.unblind(&EC, att_out.blinding_seckey).is_err());
     }
 
     #[test]

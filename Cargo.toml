@@ -13,3 +13,4 @@ license = "BSD-3-Clause"
 [dependencies]
 lwk_wollet = "0.17.0"
 bech32 = "0.11"
+rand = "0.8"
