@@ -1,0 +1,15 @@
+[package]
+name = "elip-sp-reference"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal, standalone reference implementation for the Silent Payments for the Liquid Network ELIP. Re-derives the spec's test vectors using LWK only as a source of cryptographic primitives."
+license = "BSD-3-Clause"
+
+# This crate is the reference the ELIP points at. It deliberately depends on LWK
+# *only* for the underlying secp256k1 / elements primitives (the global `EC`
+# context, `PublicKey`/`SecretKey`/`Scalar`, the tagged-hash machinery, Taproot
+# script construction). Everything specific to Silent Payments is implemented here
+# from the ELIP, so the crate reproduces the construction byte-for-byte on its own.
+[dependencies]
+lwk_wollet = "0.17.0"
+bech32 = "0.11"
