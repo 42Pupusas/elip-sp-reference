@@ -1,42 +1,39 @@
 # elip-sp-reference
 
-Minimal, standalone **reference implementation** for the *Silent Payments for the
-Liquid Network* ELIP.
+Reference implementation for the *Silent Payments for the Liquid Network* ELIP.
 
-It re-derives the deterministic values pinned in the ELIP's **Test Vectors** section —
-address encoding, input aggregation, the ECDH shared secret, the per-output spend key
-`P_k`, the Liquid-specific blinding key `bk_k`, and the Taproot scriptPubKey — and
-asserts they reproduce byte-for-byte (`cargo test`).
+## Contents
 
-## Why this crate exists
+`src/lib.rs` is the reference. It covers:
 
-This is the implementation the ELIP points at. It depends on
-[`lwk_wollet`](https://crates.io/crates/lwk_wollet) (from crates.io) **only** for
-cryptographic primitives: the secp256k1 context, key/scalar types, the tagged-hash
-machinery, and Taproot script construction. Every Silent Payments rule is implemented
-here directly from the ELIP. That makes it a self-contained check that the
-construction is reproducible from public primitives, and keeps the spec's reference
-small and legible.
-
-## Scope
-
-Covered:
-
-- the derivation core + known-answer test vectors (the values an independent
-  implementer must match), plus address round-trip / network separation; and
-- the spec's novel claim — a confidential output blinded to the shared-secret key
-  `BK_k` is unblinded non-interactively by the receiver with `bk_k` (the
-  `ct_round_trip_unblind_with_bk` test).
-
-Out of scope, by design — these are wallet integration, not spec verification, and are
-left to the implementation: the tweak-server scan loop, signing, and
-`Wollet`/`TxBuilder` wiring.
+- **Address encoding** — Bech32m, HRP `lqsp`/`tlqsp`, version `q`
+- **Sender derivation** — input aggregation, ECDH shared secret, `P_k`, `BK_k`, `bk_k`
+- **Tweak server** — `T = input_hash · A`, publish, and client-side `S = b_scan · T`
+- **Receiver scanning** — recompute `P_k`, match against outputs, derive spend secret
+- **Confidential output blinding and unblinding** — the ELIP's novel claim: `bk_k`
+  derived from the shared secret unblinds the output non-interactively
+- **Test vectors** — deterministic known-answer values matching the ELIP specification
 
 ## Run
 
 ```sh
-cargo test
+cargo test    # 4 tests: test_vectors, tweak_server_agreement, ct_round_trip, address
 ```
+
+## Taproot usage analysis
+
+```sh
+cargo run --bin analyze_taproot -- --blocks 500 --base-url https://liquid.network/liquid/api
+```
+
+Results are recorded in `TAPROOT_ANALYSIS.md`.
+
+## Dependencies
+
+The only external dependency is [`lwk_wollet`](https://crates.io/crates/lwk_wollet),
+used for secp256k1 primitives, key and scalar types, tagged hashes, Taproot script
+construction, and Confidential Transactions primitives. All Silent Payments logic
+is implemented directly from the ELIP.
 
 ## License
 

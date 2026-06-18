@@ -565,6 +565,9 @@ dependencies = [
  "bech32 0.11.1",
  "lwk_wollet",
  "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
