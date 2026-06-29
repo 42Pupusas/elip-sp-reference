@@ -33,7 +33,10 @@ struct HttpClient {
 
 impl HttpClient {
     fn new(base_url: &str) -> Self {
-        Self { client: reqwest::blocking::Client::new(), base_url: base_url.to_string() }
+        Self {
+            client: reqwest::blocking::Client::new(),
+            base_url: base_url.to_string(),
+        }
     }
 
     fn get(&self, path: &str) -> String {
@@ -44,12 +47,19 @@ impl HttpClient {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let body = resp.text().unwrap_or_default();
-                    if status == 200 { return body; }
+                    if status == 200 {
+                        return body;
+                    }
                     if status == 429 {
                         attempt += 1;
-                        if attempt > 10 { panic!("still rate-limited after 10 retries"); }
+                        if attempt > 10 {
+                            panic!("still rate-limited after 10 retries");
+                        }
                         let wait = Duration::from_secs(attempt as u64 * 2);
-                        eprintln!("  rate-limited (429) — waiting {:?} (attempt {})", wait, attempt);
+                        eprintln!(
+                            "  rate-limited (429) — waiting {:?} (attempt {})",
+                            wait, attempt
+                        );
                         sleep(wait);
                         continue;
                     }
@@ -57,9 +67,14 @@ impl HttpClient {
                 }
                 Err(e) => {
                     attempt += 1;
-                    if attempt > 5 { panic!("request failed after 5 attempts: {}", e); }
+                    if attempt > 5 {
+                        panic!("request failed after 5 attempts: {}", e);
+                    }
                     let wait = Duration::from_millis(500 * (1 << attempt));
-                    eprintln!("  request error (attempt {}/5): {} — retrying in {:?}", attempt, e, wait);
+                    eprintln!(
+                        "  request error (attempt {}/5): {} — retrying in {:?}",
+                        attempt, e, wait
+                    );
                     sleep(wait);
                 }
             }
@@ -81,16 +96,29 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--blocks" => { i += 1; blocks_to_fetch = args[i].parse().expect("--blocks needs a number"); }
-            "--base-url" => { i += 1; base_url = args[i].clone(); }
-            _ => { eprintln!("unknown arg: {}", args[i]); std::process::exit(1); }
+            "--blocks" => {
+                i += 1;
+                blocks_to_fetch = args[i].parse().expect("--blocks needs a number");
+            }
+            "--base-url" => {
+                i += 1;
+                base_url = args[i].clone();
+            }
+            _ => {
+                eprintln!("unknown arg: {}", args[i]);
+                std::process::exit(1);
+            }
         }
         i += 1;
     }
 
     eprintln!("fetching {} blocks from {} ...", blocks_to_fetch, base_url);
     let http = HttpClient::new(&base_url);
-    let tip_height: u32 = http.get("blocks/tip/height").trim().parse().expect("tip height is a u32");
+    let tip_height: u32 = http
+        .get("blocks/tip/height")
+        .trim()
+        .parse()
+        .expect("tip height is a u32");
     eprintln!("tip height = {}", tip_height);
 
     let start_height = tip_height.saturating_sub(blocks_to_fetch - 1);
@@ -101,7 +129,10 @@ fn main() {
     let t0 = Instant::now();
 
     for height in start_height..=tip_height {
-        let hash = http.get(&format!("block-height/{}", height)).trim().to_string();
+        let hash = http
+            .get(&format!("block-height/{}", height))
+            .trim()
+            .to_string();
         let body = http.get(&format!("block/{}/txs", hash));
         let txs = parse_txs(&body);
         sleep(Duration::from_millis(200));
@@ -110,12 +141,20 @@ fn main() {
             tx_count += 1;
             for vout in &tx.vout {
                 total_outputs += 1;
-                *type_counts.entry(vout.scriptpubkey_type.clone()).or_insert(0) += 1;
+                *type_counts
+                    .entry(vout.scriptpubkey_type.clone())
+                    .or_insert(0) += 1;
             }
         }
         blocks_processed += 1;
         if blocks_processed % 25 == 0 {
-            eprintln!("  block {}/{} (height {}) — {:.1}s", blocks_processed, blocks_to_fetch, height, t0.elapsed().as_secs_f64());
+            eprintln!(
+                "  block {}/{} (height {}) — {:.1}s",
+                blocks_processed,
+                blocks_to_fetch,
+                height,
+                t0.elapsed().as_secs_f64()
+            );
         }
     }
 
@@ -123,14 +162,21 @@ fn main() {
     let mut sorted: Vec<_> = type_counts.iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(a.1));
     let taproot_count = type_counts.get("v1_p2tr").copied().unwrap_or(0);
-    let taproot_pct = if total_outputs > 0 { taproot_count as f64 / total_outputs as f64 * 100.0 } else { 0.0 };
+    let taproot_pct = if total_outputs > 0 {
+        taproot_count as f64 / total_outputs as f64 * 100.0
+    } else {
+        0.0
+    };
     let avg_per_block = taproot_count as f64 / blocks_processed as f64;
 
     println!();
     println!("═══════════════════════════════════════════════");
     println!("Liquid Taproot Usage Analysis");
     println!("═══════════════════════════════════════════════");
-    println!("blocks scanned:  {}  ({}-{})", blocks_processed, start_height, tip_height);
+    println!(
+        "blocks scanned:  {}  ({}-{})",
+        blocks_processed, start_height, tip_height
+    );
     println!("transactions:    {}", tx_count);
     println!("total outputs:   {}", total_outputs);
     println!("time:            {:.1}s", elapsed);
@@ -138,7 +184,11 @@ fn main() {
     println!("{:<30} {:>10} {:>10}", "script type", "count", "%");
     println!("{:-<52}", "");
     for (typ, count) in &sorted {
-        let pct = if total_outputs > 0 { **count as f64 / total_outputs as f64 * 100.0 } else { 0.0 };
+        let pct = if total_outputs > 0 {
+            **count as f64 / total_outputs as f64 * 100.0
+        } else {
+            0.0
+        };
         println!("{:<30} {:>10} {:>9.2}%", typ, count, pct);
     }
     println!("{:-<52}", "");
@@ -146,7 +196,10 @@ fn main() {
     println!("═══════════════════════════════════════════════");
     println!("KEY FINDING");
     println!("═══════════════════════════════════════════════");
-    println!("Taproot (v1_p2tr) outputs: {} / {} ({:.2}%)", taproot_count, total_outputs, taproot_pct);
+    println!(
+        "Taproot (v1_p2tr) outputs: {} / {} ({:.2}%)",
+        taproot_count, total_outputs, taproot_pct
+    );
     println!("avg v1_p2tr per block:    {:.1}", avg_per_block);
     println!();
 
@@ -165,9 +218,15 @@ fn main() {
         println!("  3. Accept degraded unlinkability for early adopters");
         println!("     and document as a known bootstrapping limitation");
     } else if avg_per_block < 3.0 {
-        println!("NOTE: Taproot usage exists but is thin ({:.1}/block).", avg_per_block);
+        println!(
+            "NOTE: Taproot usage exists but is thin ({:.1}/block).",
+            avg_per_block
+        );
         println!("  SP outputs have a limited per-block anonymity set.");
-        println!("  In aggregate (~{:.0} across the scan window) they are", taproot_count);
+        println!(
+            "  In aggregate (~{:.0} across the scan window) they are",
+            taproot_count
+        );
         println!("  harder to single out, but per-block analysis is a concern.");
         println!("  This is a known bootstrapping limitation - improves with adoption.");
     } else {
