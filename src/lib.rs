@@ -52,7 +52,7 @@ use lwk_wollet::elements::schnorr::TweakedPublicKey;
 use lwk_wollet::elements::secp256k1_zkp::XOnlyPublicKey;
 use lwk_wollet::elements::Script;
 use lwk_wollet::hashes::{sha256t_hash_newtype, Hash, HashEngine};
-use lwk_wollet::secp256k1::{PublicKey, Scalar, SecretKey};
+use lwk_wollet::secp256k1::{Parity, PublicKey, Scalar, SecretKey};
 use lwk_wollet::{ElementsNetwork, EC};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -194,6 +194,21 @@ fn secret_key_to_scalar(sk: &SecretKey) -> Scalar {
     Scalar::from_be_bytes(sk.secret_bytes()).expect("secret key is a valid scalar")
 }
 
+/// BIP-352 even-Y normalization for a Taproot (BIP-341) input key.
+///
+/// A taproot prevout commits only to the x-only key, i.e. the implicit public
+/// key has an even Y. The signing key for the silent-payment computation must
+/// therefore be the one whose public key is even-Y: if `sk·G` has odd Y, negate
+/// `sk` (which flips the parity) before aggregating. For non-taproot inputs the
+/// full public key is recoverable from the witness/scriptSig and no negation is
+/// applied.
+fn normalize_taproot_input_key(sk: SecretKey) -> SecretKey {
+    match sk.x_only_public_key(&EC).1 {
+        Parity::Even => sk,
+        Parity::Odd => sk.negate(),
+    }
+}
+
 /// `input_hash = SHA256("BIP0352/Inputs"||"BIP0352/Inputs" || outpoint_L || serP(A))` mod n.
 fn input_hash(outpoint_l: &[u8], a_pubkey: &PublicKey) -> Scalar {
     let mut eng = InputsHash::engine();
@@ -248,15 +263,44 @@ fn derive_output(spend_base: &PublicKey, s: &PublicKey, k: u32) -> SilentPayment
 // ── Public API ──
 
 /// Aggregate the sender's eligible inputs.
+///
+/// Keys are used as-is; this models a set of non-taproot inputs whose full public
+/// key is recoverable from the witness/scriptSig. For taproot (BIP-341) inputs,
+/// use [`aggregate_inputs_with_parity`] so the even-Y normalization is applied.
 pub fn aggregate_inputs(
     inputs: &[(Vec<u8>, SecretKey)],
     outpoint_l: &[u8],
 ) -> AggregatedInputs {
+    let keys: Vec<(Vec<u8>, SecretKey, bool)> =
+        inputs.iter().map(|(o, sk)| (o.clone(), *sk, false)).collect();
+    aggregate_inputs_with_parity(&keys, outpoint_l)
+}
+
+/// Aggregate eligible inputs, applying BIP-352 even-Y normalization per input.
+///
+/// Each entry is `(outpoint, private_key, is_taproot)`. For taproot inputs the
+/// key is replaced by [`normalize_taproot_input_key`] before summation, exactly
+/// as BIP-352 requires ("for each private key `a_i` corresponding to a BIP341
+/// taproot output, check that the private key produces a point with an even Y
+/// coordinate and negate the private key if not"). The aggregate `a` and
+/// `A = a·G` — and therefore every derived output — differ from the un-normalized
+/// aggregate whenever any taproot input key had odd Y.
+pub fn aggregate_inputs_with_parity(
+    inputs: &[(Vec<u8>, SecretKey, bool)],
+    outpoint_l: &[u8],
+) -> AggregatedInputs {
+    let norm = |sk: SecretKey, is_taproot: bool| {
+        if is_taproot {
+            normalize_taproot_input_key(sk)
+        } else {
+            sk
+        }
+    };
     let (first, rest) = inputs.split_first().expect("at least one eligible input");
-    let mut a_sum = first.1;
-    for (_, sk) in rest {
+    let mut a_sum = norm(first.1, first.2);
+    for (_, sk, is_taproot) in rest {
         a_sum = a_sum
-            .add_tweak(&secret_key_to_scalar(sk))
+            .add_tweak(&secret_key_to_scalar(&norm(*sk, *is_taproot)))
             .expect("non-zero aggregated key");
     }
     let a_pubkey = a_sum.public_key(&EC);
@@ -495,6 +539,73 @@ mod tests {
             address.encode(ElementsNetwork::Liquid),
             "lqsp1qqd8n2k7uklxq4aegau7vawtptkgxsja4kt99lpv6krctwpq8tpc65qjxd4lu4etruh9sngx3su9mtqp5fqzxz7re59y5nnez9p03ht3lyudcfhfe",
             "mainnet address"
+        );
+    }
+
+    /// BIP-352 even-Y normalization for taproot inputs.
+    ///
+    /// `normalize_taproot_input_key` must return a key whose public point has
+    /// even Y, leaving even-Y keys untouched and negating odd-Y ones. We assert
+    /// the invariant directly, and that aggregating an odd-Y key *as taproot*
+    /// changes the aggregate (negation happened) while aggregating it *as
+    /// non-taproot* does not.
+    #[test]
+    fn taproot_even_y_negation() {
+        // Find one even-Y and one odd-Y sample key among simple byte fills.
+        let mut even_key = None;
+        let mut odd_key = None;
+        for b in 1u8..=0xff {
+            let sk = sk_byte(b);
+            match sk.x_only_public_key(&EC).1 {
+                Parity::Even if even_key.is_none() => even_key = Some(sk),
+                Parity::Odd if odd_key.is_none() => odd_key = Some(sk),
+                _ => {}
+            }
+            if even_key.is_some() && odd_key.is_some() {
+                break;
+            }
+        }
+        let even_key = even_key.expect("some even-Y key exists");
+        let odd_key = odd_key.expect("some odd-Y key exists");
+
+        // Invariant: output always has even-Y public key.
+        for sk in [even_key, odd_key] {
+            let norm = normalize_taproot_input_key(sk);
+            assert_eq!(
+                norm.x_only_public_key(&EC).1,
+                Parity::Even,
+                "normalized key must have even-Y public point"
+            );
+        }
+        // Even-Y key is untouched; odd-Y key is negated.
+        assert_eq!(normalize_taproot_input_key(even_key), even_key, "even-Y unchanged");
+        assert_eq!(normalize_taproot_input_key(odd_key), odd_key.negate(), "odd-Y negated");
+
+        // Aggregation: treating the odd-Y key as taproot must differ from
+        // treating it as non-taproot (the negation changes `a` and `A`).
+        let op = outpoint(0x10, 0);
+        let as_taproot = aggregate_inputs_with_parity(&[(op.clone(), odd_key, true)], &op);
+        let as_legacy = aggregate_inputs_with_parity(&[(op.clone(), odd_key, false)], &op);
+        assert_ne!(
+            as_taproot.a_pubkey.serialize(),
+            as_legacy.a_pubkey.serialize(),
+            "odd-Y taproot input must be negated, changing A"
+        );
+        // The taproot aggregate's A is the even-Y point of the odd-Y key.
+        assert_eq!(
+            as_taproot.a_pubkey.x_only_public_key().0,
+            odd_key.x_only_public_key(&EC).0,
+            "x-only A is unchanged by negation"
+        );
+        assert_eq!(as_taproot.a_pubkey.serialize()[0], 0x02, "A is even-Y");
+
+        // An even-Y taproot input behaves identically to a non-taproot input.
+        let t_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, true)], &op);
+        let l_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, false)], &op);
+        assert_eq!(
+            t_even.a_pubkey.serialize(),
+            l_even.a_pubkey.serialize(),
+            "even-Y key: taproot vs non-taproot agree"
         );
     }
 
