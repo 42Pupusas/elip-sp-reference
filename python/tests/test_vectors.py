@@ -14,6 +14,7 @@ from secp256k1lab.secp256k1 import G, GE, Scalar  # noqa: E402
 
 from elip_sp_reference import (  # noqa: E402
     blinding_privkey,
+    compute_tweak,
     decode_silent_payment_address,
     encode_silent_payment_address,
     get_input_hash,
@@ -22,6 +23,7 @@ from elip_sp_reference import (  # noqa: E402
     receiver_shared_secret,
     script_pubkey,
     sender_shared_secret,
+    shared_secret_from_tweak,
     sum_input_privkeys,
 )
 
@@ -146,10 +148,11 @@ def test_tweak_server_agreement():
 
     S_sender = sender_shared_secret(input_hash, a_sum, B_scan)
 
-    # Server side: T = input_hash * A (no secrets).
-    T = input_hash * A
+    # Server side: publish T = input_hash * A from public keys only.
+    T, ih_server, A_server = compute_tweak([sk(0x55) * G], [op])
+    assert A_server == A and ih_server == input_hash
     # Client side: S = b_scan * T.
-    S_client = b_scan * T
+    S_client = shared_secret_from_tweak(b_scan, T)
 
     assert S_client == S_sender, "client shared secret matches sender"
     assert output_pubkey(B_spend, S_client, 0) == output_pubkey(B_spend, S_sender, 0)

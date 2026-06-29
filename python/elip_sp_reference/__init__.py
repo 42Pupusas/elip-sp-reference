@@ -25,6 +25,8 @@ from .core import (
     output_spend_privkey,
     blinding_privkey,
     script_pubkey,
+    compute_tweak,
+    shared_secret_from_tweak,
     build_confidential_sp_txout,
     unblind_output,
 )
@@ -47,6 +49,8 @@ __all__ = [
     "output_spend_privkey",
     "blinding_privkey",
     "script_pubkey",
+    "compute_tweak",
+    "shared_secret_from_tweak",
     "build_confidential_sp_txout",
     "unblind_output",
 ]

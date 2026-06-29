@@ -36,7 +36,8 @@ Liquid-specific additions are:
 ```
 elip_sp_reference/
   __init__.py     public API re-exports
-  core.py         the protocol — addresses, inputs, shared secret, derivation, CT
+  core.py         the protocol — addresses, inputs, shared secret, derivation,
+                  tweak server, and CT blinding/unblinding
   bech32m.py      Bech32m, verbatim from BIP-350 / the BIP-352 reference
 tests/
   test_vectors.py byte-pinned vectors + taproot/tweak-server/address/CT round-trips

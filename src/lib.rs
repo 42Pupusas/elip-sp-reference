@@ -19,7 +19,7 @@
 //! Given the receiver's address `(B_scan, B_spend)` and eligible inputs:
 //!
 //!   a. `a = Σ a_i`,  `A = a·G`
-//!   b. Pick the lexicographically smallest outpoint `outpoint_L`
+//!   b. `outpoint_L` = the lexicographically smallest input outpoint
 //!   c. `input_hash = SHA256("BIP0352/Inputs"||"BIP0352/Inputs" || outpoint_L || serP(A))` mod n
 //!   d. `S = input_hash · a · B_scan`
 //!   e. For each output index `k`:
@@ -209,10 +209,21 @@ fn normalize_taproot_input_key(sk: SecretKey) -> SecretKey {
     }
 }
 
+/// The lexicographically smallest outpoint, `outpoint_L`.
+fn lowest_outpoint(outpoints: impl IntoIterator<Item = impl AsRef<[u8]>>) -> Vec<u8> {
+    outpoints
+        .into_iter()
+        .map(|o| o.as_ref().to_vec())
+        .min()
+        .expect("at least one outpoint")
+}
+
 /// `input_hash = SHA256("BIP0352/Inputs"||"BIP0352/Inputs" || outpoint_L || serP(A))` mod n.
-fn input_hash(outpoint_l: &[u8], a_pubkey: &PublicKey) -> Scalar {
+///
+/// `outpoint_L` is the lexicographically smallest outpoint, selected internally.
+fn input_hash(outpoints: &[Vec<u8>], a_pubkey: &PublicKey) -> Scalar {
     let mut eng = InputsHash::engine();
-    eng.input(outpoint_l);
+    eng.input(&lowest_outpoint(outpoints));
     eng.input(&a_pubkey.serialize());
     Scalar::from_be_bytes(InputsHash::from_engine(eng).to_byte_array())
         .expect("input_hash < curve order")
@@ -232,14 +243,14 @@ fn blinding_secret(s: &PublicKey, k: u32) -> SecretKey {
     let mut eng = BlindHash::engine();
     eng.input(&s.serialize());
     eng.input(&k.to_be_bytes());
-    SecretKey::from_slice(&BlindHash::from_engine(eng).to_byte_array())
-        .expect("bk_k < curve order")
+    SecretKey::from_slice(&BlindHash::from_engine(eng).to_byte_array()).expect("bk_k < curve order")
 }
 
 /// Sender's ECDH shared secret: `S = input_hash · a · B_scan`.
 fn sender_shared_secret(scan: &PublicKey, agg: &AggregatedInputs) -> PublicKey {
     let a_ih = agg.a_sum.mul_tweak(&agg.input_hash).expect("scalar mul");
-    scan.mul_tweak(&EC, &secret_key_to_scalar(&a_ih)).expect("ecdh")
+    scan.mul_tweak(&EC, &secret_key_to_scalar(&a_ih))
+        .expect("ecdh")
 }
 
 /// Receiver's ECDH shared secret: `S = b_scan · (input_hash · A)`.
@@ -249,7 +260,9 @@ fn receiver_shared_secret(
     input_hash: &Scalar,
 ) -> PublicKey {
     let b_ih = b_scan.mul_tweak(input_hash).expect("scalar mul");
-    a_pubkey.mul_tweak(&EC, &secret_key_to_scalar(&b_ih)).expect("ecdh")
+    a_pubkey
+        .mul_tweak(&EC, &secret_key_to_scalar(&b_ih))
+        .expect("ecdh")
 }
 
 /// Derive `P_k`, `bk_k`, `BK_k` for output `k` from a shared secret and spend base.
@@ -257,7 +270,11 @@ fn derive_output(spend_base: &PublicKey, s: &PublicKey, k: u32) -> SilentPayment
     let t_k = shared_secret_tweak(s, k);
     let spend_pubkey = spend_base.add_exp_tweak(&EC, &t_k).expect("P_k");
     let sk = blinding_secret(s, k);
-    SilentPaymentOutput { spend_pubkey, blinding_pubkey: sk.public_key(&EC), blinding_seckey: sk }
+    SilentPaymentOutput {
+        spend_pubkey,
+        blinding_pubkey: sk.public_key(&EC),
+        blinding_seckey: sk,
+    }
 }
 
 // ── Public API ──
@@ -267,13 +284,12 @@ fn derive_output(spend_base: &PublicKey, s: &PublicKey, k: u32) -> SilentPayment
 /// Keys are used as-is; this models a set of non-taproot inputs whose full public
 /// key is recoverable from the witness/scriptSig. For taproot (BIP-341) inputs,
 /// use [`aggregate_inputs_with_parity`] so the even-Y normalization is applied.
-pub fn aggregate_inputs(
-    inputs: &[(Vec<u8>, SecretKey)],
-    outpoint_l: &[u8],
-) -> AggregatedInputs {
-    let keys: Vec<(Vec<u8>, SecretKey, bool)> =
-        inputs.iter().map(|(o, sk)| (o.clone(), *sk, false)).collect();
-    aggregate_inputs_with_parity(&keys, outpoint_l)
+pub fn aggregate_inputs(inputs: &[(Vec<u8>, SecretKey)]) -> AggregatedInputs {
+    let keys: Vec<(Vec<u8>, SecretKey, bool)> = inputs
+        .iter()
+        .map(|(o, sk)| (o.clone(), *sk, false))
+        .collect();
+    aggregate_inputs_with_parity(&keys)
 }
 
 /// Aggregate eligible inputs, applying BIP-352 even-Y normalization per input.
@@ -285,10 +301,7 @@ pub fn aggregate_inputs(
 /// coordinate and negate the private key if not"). The aggregate `a` and
 /// `A = a·G` — and therefore every derived output — differ from the un-normalized
 /// aggregate whenever any taproot input key had odd Y.
-pub fn aggregate_inputs_with_parity(
-    inputs: &[(Vec<u8>, SecretKey, bool)],
-    outpoint_l: &[u8],
-) -> AggregatedInputs {
+pub fn aggregate_inputs_with_parity(inputs: &[(Vec<u8>, SecretKey, bool)]) -> AggregatedInputs {
     let norm = |sk: SecretKey, is_taproot: bool| {
         if is_taproot {
             normalize_taproot_input_key(sk)
@@ -304,8 +317,13 @@ pub fn aggregate_inputs_with_parity(
             .expect("non-zero aggregated key");
     }
     let a_pubkey = a_sum.public_key(&EC);
-    let input_hash = input_hash(outpoint_l, &a_pubkey);
-    AggregatedInputs { a_sum, a_pubkey, input_hash }
+    let outpoints: Vec<Vec<u8>> = inputs.iter().map(|(o, _, _)| o.clone()).collect();
+    let input_hash = input_hash(&outpoints, &a_pubkey);
+    AggregatedInputs {
+        a_sum,
+        a_pubkey,
+        input_hash,
+    }
 }
 
 /// Sender: derive output `k` for a given address.
@@ -340,14 +358,15 @@ pub fn receiver_derive_output(
 // The server publishes `T = input_hash · A`. The client computes `S = b_scan · T`.
 // On Liquid, BIP-158 compact filters are unnecessary: the scriptPubKey is public.
 
-/// Compute `(T = input_hash · A, input_hash, A)` from the eligible input public keys.
+/// Compute `(T = input_hash · A, input_hash, A)` from the eligible input public
+/// keys and the transaction's outpoints (the smallest is selected internally).
 pub fn compute_tweak(
     input_pubkeys: &[PublicKey],
-    outpoint_l: &[u8],
+    outpoints: &[Vec<u8>],
 ) -> (PublicKey, Scalar, PublicKey) {
     let a = PublicKey::combine_keys(&input_pubkeys.iter().collect::<Vec<_>>())
         .expect("at least one input pubkey");
-    let ih = input_hash(outpoint_l, &a);
+    let ih = input_hash(outpoints, &a);
     let t = a.mul_tweak(&EC, &ih).expect("tweak point");
     (t, ih, a)
 }
@@ -356,9 +375,9 @@ pub fn compute_tweak(
 #[derive(Debug, Clone)]
 pub struct TweakEntry {
     pub txid: [u8; 32],
-    pub tweak: PublicKey,     // T = input_hash · A
-    pub a_pubkey: PublicKey,  // A
-    pub input_hash: Scalar,   // input_hash
+    pub tweak: PublicKey,    // T = input_hash · A
+    pub a_pubkey: PublicKey, // A
+    pub input_hash: Scalar,  // input_hash
 }
 
 /// Minimal tweak server.
@@ -368,14 +387,14 @@ pub struct TweakServer {
 }
 
 impl TweakServer {
-    pub fn publish(
-        &mut self,
-        txid: [u8; 32],
-        input_pubkeys: &[PublicKey],
-        outpoint_l: &[u8],
-    ) {
-        let (tweak, input_hash, a_pubkey) = compute_tweak(input_pubkeys, outpoint_l);
-        self.entries.push(TweakEntry { txid, tweak, a_pubkey, input_hash });
+    pub fn publish(&mut self, txid: [u8; 32], input_pubkeys: &[PublicKey], outpoints: &[Vec<u8>]) {
+        let (tweak, input_hash, a_pubkey) = compute_tweak(input_pubkeys, outpoints);
+        self.entries.push(TweakEntry {
+            txid,
+            tweak,
+            a_pubkey,
+            input_hash,
+        });
     }
 
     pub fn get_by_txid(&self, txid: &[u8; 32]) -> Option<&TweakEntry> {
@@ -403,7 +422,10 @@ pub fn build_confidential_sp_txout(
     value: u64,
     rng: &mut (impl rand::RngCore + rand::CryptoRng),
 ) -> Result<
-    (lwk_wollet::elements::TxOut, lwk_wollet::elements::TxOutSecrets),
+    (
+        lwk_wollet::elements::TxOut,
+        lwk_wollet::elements::TxOutSecrets,
+    ),
     lwk_wollet::elements::secp256k1_zkp::Error,
 > {
     use lwk_wollet::elements::confidential::{
@@ -418,21 +440,28 @@ pub fn build_confidential_sp_txout(
     let vbf = ValueBlindingFactor::new(&mut *rng);
 
     // CT nonce derived from BK_k — this is what lets the receiver unblind.
-    let (nonce, ct_shared_secret) =
-        Nonce::new_confidential(&mut *rng, &EC, &out.blinding_pubkey);
+    let (nonce, ct_shared_secret) = Nonce::new_confidential(&mut *rng, &EC, &out.blinding_pubkey);
 
     let asset_tag = Tag::from(asset.into_inner().to_byte_array());
     let asset_gen = Generator::new_blinded(&EC, asset_tag, abf.into_inner());
-    let value_commitment =
-        PedersenCommitment::new(&EC, value, vbf.into_inner(), asset_gen);
+    let value_commitment = PedersenCommitment::new(&EC, value, vbf.into_inner(), asset_gen);
 
     let mut message = [0u8; 64];
     message[..32].copy_from_slice(&asset.into_inner().to_byte_array());
     message[32..].copy_from_slice(abf.into_inner().as_ref());
 
     let rangeproof = RangeProof::new(
-        &EC, 1, value_commitment, value, vbf.into_inner(),
-        &message, script_pubkey.as_bytes(), ct_shared_secret, 0, 52, asset_gen,
+        &EC,
+        1,
+        value_commitment,
+        value,
+        vbf.into_inner(),
+        &message,
+        script_pubkey.as_bytes(),
+        ct_shared_secret,
+        0,
+        52,
+        asset_gen,
     )?;
 
     let txout = TxOut {
@@ -440,9 +469,17 @@ pub fn build_confidential_sp_txout(
         value: Value::Confidential(value_commitment),
         nonce,
         script_pubkey,
-        witness: TxOutWitness { surjection_proof: None, rangeproof: Some(Box::new(rangeproof)) },
+        witness: TxOutWitness {
+            surjection_proof: None,
+            rangeproof: Some(Box::new(rangeproof)),
+        },
     };
-    let secrets = TxOutSecrets { asset, asset_bf: abf, value, value_bf: vbf };
+    let secrets = TxOutSecrets {
+        asset,
+        asset_bf: abf,
+        value,
+        value_bf: vbf,
+    };
 
     Ok((txout, secrets))
 }
@@ -487,10 +524,10 @@ mod tests {
             spend: b_spend.public_key(&EC),
         };
 
-        let agg = aggregate_inputs(
-            &[(outpoint(0x10, 0), sk_byte(0x31)), (outpoint(0x20, 1), sk_byte(0x32))],
-            &outpoint(0x10, 0),
-        );
+        let agg = aggregate_inputs(&[
+            (outpoint(0x10, 0), sk_byte(0x31)),
+            (outpoint(0x20, 1), sk_byte(0x32)),
+        ]);
 
         assert_eq!(
             agg.a_pubkey.serialize().to_lower_hex_string(),
@@ -528,11 +565,31 @@ mod tests {
                 receiver_derive_output(&b_scan, &b_spend, &agg.a_pubkey, &agg.input_hash, k);
 
             assert_eq!(sender, recv, "sender/receiver agree at k={k}");
-            assert_eq!(sender.spend_pubkey.serialize().to_lower_hex_string(), pk,      "P_k k={k}");
-            assert_eq!(sender.blinding_pubkey.serialize().to_lower_hex_string(), bk,   "BK_k k={k}");
-            assert_eq!(sender.blinding_seckey.secret_bytes().to_lower_hex_string(), bk_sk, "bk_k k={k}");
-            assert_eq!(spend_sk.secret_bytes().to_lower_hex_string(), spk_sk, "spend_sk k={k}");
-            assert_eq!(sender.script_pubkey().as_bytes().to_lower_hex_string(), script, "scriptPubKey k={k}");
+            assert_eq!(
+                sender.spend_pubkey.serialize().to_lower_hex_string(),
+                pk,
+                "P_k k={k}"
+            );
+            assert_eq!(
+                sender.blinding_pubkey.serialize().to_lower_hex_string(),
+                bk,
+                "BK_k k={k}"
+            );
+            assert_eq!(
+                sender.blinding_seckey.secret_bytes().to_lower_hex_string(),
+                bk_sk,
+                "bk_k k={k}"
+            );
+            assert_eq!(
+                spend_sk.secret_bytes().to_lower_hex_string(),
+                spk_sk,
+                "spend_sk k={k}"
+            );
+            assert_eq!(
+                sender.script_pubkey().as_bytes().to_lower_hex_string(),
+                script,
+                "scriptPubKey k={k}"
+            );
         }
 
         assert_eq!(
@@ -578,14 +635,22 @@ mod tests {
             );
         }
         // Even-Y key is untouched; odd-Y key is negated.
-        assert_eq!(normalize_taproot_input_key(even_key), even_key, "even-Y unchanged");
-        assert_eq!(normalize_taproot_input_key(odd_key), odd_key.negate(), "odd-Y negated");
+        assert_eq!(
+            normalize_taproot_input_key(even_key),
+            even_key,
+            "even-Y unchanged"
+        );
+        assert_eq!(
+            normalize_taproot_input_key(odd_key),
+            odd_key.negate(),
+            "odd-Y negated"
+        );
 
         // Aggregation: treating the odd-Y key as taproot must differ from
         // treating it as non-taproot (the negation changes `a` and `A`).
         let op = outpoint(0x10, 0);
-        let as_taproot = aggregate_inputs_with_parity(&[(op.clone(), odd_key, true)], &op);
-        let as_legacy = aggregate_inputs_with_parity(&[(op.clone(), odd_key, false)], &op);
+        let as_taproot = aggregate_inputs_with_parity(&[(op.clone(), odd_key, true)]);
+        let as_legacy = aggregate_inputs_with_parity(&[(op.clone(), odd_key, false)]);
         assert_ne!(
             as_taproot.a_pubkey.serialize(),
             as_legacy.a_pubkey.serialize(),
@@ -600,8 +665,8 @@ mod tests {
         assert_eq!(as_taproot.a_pubkey.serialize()[0], 0x02, "A is even-Y");
 
         // An even-Y taproot input behaves identically to a non-taproot input.
-        let t_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, true)], &op);
-        let l_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, false)], &op);
+        let t_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, true)]);
+        let l_even = aggregate_inputs_with_parity(&[(op.clone(), even_key, false)]);
         assert_eq!(
             t_even.a_pubkey.serialize(),
             l_even.a_pubkey.serialize(),
@@ -619,22 +684,31 @@ mod tests {
             spend: b_spend.public_key(&EC),
         };
 
-        let agg = aggregate_inputs(&[(outpoint(0xAA, 0), sk_byte(0x55))], &outpoint(0xAA, 0));
+        let agg = aggregate_inputs(&[(outpoint(0xAA, 0), sk_byte(0x55))]);
         let sender_out = sender_derive_output(&address, &agg, 0);
 
         // Tweak server publishes T from public keys only.
         let (tweak, input_hash, a_pubkey) =
-            compute_tweak(&[sk_byte(0x55).public_key(&EC)], &outpoint(0xAA, 0));
+            compute_tweak(&[sk_byte(0x55).public_key(&EC)], &[outpoint(0xAA, 0)]);
         let client_s = shared_secret_from_tweak(
             &b_scan,
-            &TweakEntry { txid: [0u8; 32], tweak, a_pubkey, input_hash },
+            &TweakEntry {
+                txid: [0u8; 32],
+                tweak,
+                a_pubkey,
+                input_hash,
+            },
         );
 
         let client_out = derive_output(&b_spend.public_key(&EC), &client_s, 0);
         assert_eq!(client_out, sender_out, "client output must match sender");
 
         let sender_s = sender_shared_secret(&address.scan, &agg);
-        assert_eq!(client_s.serialize(), sender_s.serialize(), "shared secrets must match");
+        assert_eq!(
+            client_s.serialize(),
+            sender_s.serialize(),
+            "shared secrets must match"
+        );
     }
 
     /// CT round-trip: sender blinds to BK_k, receiver unblinds with bk_k.
@@ -649,7 +723,7 @@ mod tests {
             spend: b_spend.public_key(&EC),
         };
 
-        let agg = aggregate_inputs(&[(outpoint(0xAB, 0), sk_byte(0x33))], &outpoint(0xAB, 0));
+        let agg = aggregate_inputs(&[(outpoint(0xAB, 0), sk_byte(0x33))]);
         let k = 0;
         let asset = AssetId::from_slice(&[0x42; 32]).unwrap();
         let value = 123_456u64;

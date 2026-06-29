@@ -165,6 +165,29 @@ def script_pubkey(P_k: GE) -> bytes:
     return bytes([0x51, 0x20]) + P_k.to_bytes_xonly()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+# Tweak server
+# ═══════════════════════════════════════════════════════════════════════════════════════════
+#
+# The server publishes T = input_hash * A per transaction; a client holding
+# b_scan computes S = b_scan * T, recovering the sender's shared secret without
+# learning any private key. On Liquid the scriptPubKey is public, so BIP-158
+# compact filters are unnecessary.
+
+
+def compute_tweak(input_pubkeys: List[GE], outpoints: List[bytes]) -> Tuple[GE, Scalar, GE]:
+    """Compute (T = input_hash * A, input_hash, A) from the eligible input pubkeys."""
+    A = GE.sum(*input_pubkeys)
+    input_hash = get_input_hash(outpoints, A)
+    T = input_hash * A
+    return T, input_hash, A
+
+
+def shared_secret_from_tweak(b_scan: Scalar, T: GE) -> GE:
+    """S = b_scan * T (from a published tweak)."""
+    return b_scan * T
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Confidential Transactions blinding / unblinding (Liquid-specific)
 # ═══════════════════════════════════════════════════════════════════════════════
