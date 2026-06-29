@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "elip-sp-reference"
+version = "0.1.0"
+description = "Python reference implementation for the Silent Payments for the Liquid Network ELIP. Written in the BIP-352 reference style with secp256k1lab; re-derives the spec's test vectors and uses wallycore for the Liquid Confidential Transactions plumbing."
+license = { text = "BSD-3-Clause" }
+requires-python = ">=3.11"
+dependencies = [
+    # Pure-Python secp256k1 (INSECURE; prototyping only) — same library the
+    # canonical BIP-352 reference uses. Not on PyPI; installed from git.
+    "secp256k1lab @ git+https://github.com/secp256k1lab/secp256k1lab.git",
+    # Liquid-specific Confidential Transactions primitives.
+    "wallycore>=1.3.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.setuptools]
+packages = ["elip_sp_reference"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
