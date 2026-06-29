@@ -4,7 +4,15 @@ Reference implementation for the *Silent Payments for the Liquid Network* ELIP.
 
 ## Contents
 
-`src/lib.rs` is the reference. It covers:
+There are two independent implementations that derive the same test vectors
+byte-for-byte:
+
+- `src/lib.rs` — Rust, built on `lwk_wollet`.
+- `python/` — Python, in the canonical BIP-352 `reference.py` style, using the
+  pure-Python `secp256k1lab` for the curve algebra and `wallycore` only for the
+  Liquid Confidential Transactions plumbing. See [`python/README.md`](python/README.md).
+
+Both cover:
 
 - **Address encoding** — Bech32m, HRP `lqsp`/`tlqsp`, version `q`
 - **Sender derivation** — input aggregation, ECDH shared secret, `P_k`, `BK_k`, `bk_k`
@@ -17,7 +25,13 @@ Reference implementation for the *Silent Payments for the Liquid Network* ELIP.
 ## Run
 
 ```sh
-cargo test    # 4 tests: test_vectors, tweak_server_agreement, ct_round_trip, address
+# Rust — 5 tests: test_vectors, taproot_even_y_negation, tweak_server_agreement,
+#                 ct_round_trip_unblind_with_bk, address_round_trip_and_network_separation
+cargo test
+
+# Python — same 5 tests
+cd python && python3 -m venv .venv && source .venv/bin/activate
+pip install -e '.[test]' && pytest -v
 ```
 
 ## Taproot usage analysis
